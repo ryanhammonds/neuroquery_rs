@@ -1,0 +1,6 @@
+{
+  "dependencies": {
+    "create-wasm-app": "^0.1.0",
+    "wasm-app": "^1.0.0"
+  }
+}
