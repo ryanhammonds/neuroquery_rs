@@ -1,33 +1,53 @@
 mod model;
 mod vocab;
 mod constants;
-mod coef;
-mod mask;
-mod M;
-mod regfusion_left;
-mod regfusion_right;
 mod interpolate;
 
-use std::collections::HashMap;
-use ndarray::Array1;
-use crate::model::NeuroQuery;
-use wasm_bindgen::prelude::*;
-//use js_sys::Float64Array;
-use wasm_bindgen::JsValue;
-use wasm_bindgen::prelude::*;
+use ndarray::{Array1, Array2, Array3};
+use ndarray_npy::NpzReader;
+use std::io::Cursor;
 
+use crate::model::NeuroQuery;
+use crate::constants::Constants;
+use crate::vocab::Terms;
+
+use std::error::Error;
+use wasm_bindgen::prelude::*;
+use wasm_bindgen::JsValue;
+//use js_sys::Uint8Array;
+
+#[macro_use]
+extern crate lazy_static;
+use std::sync::Mutex;
+lazy_static! {
+    static ref GLOBAL_CONSTANTS: Mutex<Option<Constants>> = Mutex::new(None);
+}
 
 #[wasm_bindgen]
 pub fn run_query(query: &str)-> Vec<f32> {
+    // Read from global variables
+    let globals = GLOBAL_CONSTANTS.lock().unwrap();
+    let constants = globals.as_ref().unwrap();
 
+    // Initialize model
     let mut model = NeuroQuery {
-        ..Default::default()
+        terms: Terms::default().terms,
+        query: String::from("working memory"),
+        tokens: Array2::zeros((1, 6308)),
+        ntokens: 0i32,
+        constants: constants.clone(), // todo: avoid cloning
+        vt : Array2::zeros((0, 0)),
+        vnorm: Array2::zeros((0, 0)),
+        img3d : Array3::zeros((46, 55, 46))
     };
 
-    // Pass the query to the model
-    model.new_query(query.to_string()); // Call to new_query with the query string
+    // Set V^T and V_norm
+    model.smoothing_matrices();
 
-    // Tokenize the query (assuming this is defined in NeuroQuery)
+    // Pass query to the model
+    model.new_query(query.to_string());
+
+    // Tokenize query
     model.tokenize();
 
     // Transform the model and destructure the result
@@ -40,53 +60,76 @@ pub fn run_query(query: &str)-> Vec<f32> {
     lsurface_vec.append(&mut rsurface_vec);
 
     // Return a JavaScript object
-    //JsValue::from_vec(&surface_vec).unwrap
     lsurface_vec
 }
 
-// Couldn't get the below to work.
-// Not working likely from trying to reaccess structafter it left scope
-// The idea was to prevent re-inializing the strucutre, since large
-// arrays are read in everytim.
+#[wasm_bindgen]
+pub fn run_inverse_query(vertex: JsValue) -> Vec<String> {
+    // Coerce type
+    let vertex = match vertex.as_f64() {
+        Some(v) => v,
+        None => {
+            // Handle the error by returning an empty Vec or an error value
+            println!("Error: Expected a float value");
+            return vec![]; // Return an empty vector or handle as needed
+        }
+    };
 
-//
-// #[wasm_bindgen]
-// pub struct Query {
-//     model: NeuroQuery,  // Keep model as a private field
-// }
+    // Round the value and convert to i32
+    let rounded_value = vertex.round();
+    let vind = rounded_value as i32;
 
-// #[wasm_bindgen]
-// impl Query {
-//     // Constructor to initialize the model only once
-//     #[wasm_bindgen(constructor)]
-//     pub fn new() -> Query {
-//         // Initialize the model only once
-//         let mut model = NeuroQuery {
-//             ..Default::default()
-//         };
-//         Query { model }
-//     }
+    // Ensure vind is non-negative and within bounds of z
+    if vind < 0 {
+        println!("Error: Negative index");
+        return vec![];
+    }
 
-//     // Run method processes the query and returns lsurface and rsurface
-//     pub fn run(&mut self, query: &str) -> Vec<f32> {
-//         // Pass the query to the model
-//         self.model.new_query(query.to_string()); // Call to new_query with the query string
+    // Read from global variables
+    let globals = GLOBAL_CONSTANTS.lock().unwrap();
+    let constants = globals.as_ref().unwrap();
 
-//         // Tokenize the query (assuming this is defined in NeuroQuery)
-//         self.model.tokenize();
+    // Initialize model
+    let mut model = NeuroQuery {
+        terms: Terms::default().terms,
+        query: String::from("working memory"),
+        tokens: Array2::zeros((1, 6308)),
+        ntokens: 0i32,
+        constants: constants.clone(), // todo: avoid cloning
+        vt : Array2::zeros((0, 0)),
+        vnorm: Array2::zeros((0, 0)),
+        img3d : Array3::zeros((46, 55, 46))
+    };
 
-//         // Transform the model and destructure the result
-//         let (lsurface, rsurface) = self.model.transform();
+    // Set V^T and V_norm
+    model.smoothing_matrices();
 
-//         // Convert the arrays to Vec<f32> and wrap in JsValue for JavaScript
-//         let mut lsurface_vec: Vec<f32> = lsurface.to_vec();
-//         let mut rsurface_vec: Vec<f32> = rsurface.to_vec();
+    // Inverse transform
+    model.inverse_transform(vind)
+}
 
-//         lsurface_vec.append(&mut rsurface_vec);
 
-//         // Return a JavaScript object
-//         //JsValue::from_vec(&surface_vec).unwrap
-//         lsurface_vec
-//     }
-// }
+#[wasm_bindgen]
+pub fn read_npz_file(data: &[u8]) -> Result<(), JsValue> {
+    // Read npz buffer
+    let cursor = Cursor::new(data);
+    let mut npz = NpzReader::new(cursor).map_err(
+        |e| JsValue::from_str(&format!("Failed to read .npz file: {:?}", e))
+    )?;
+    let constants = Constants::new(npz).unwrap();
+    // Make global, e.g. so .npz is only read once
+    let mut globals = GLOBAL_CONSTANTS.lock().unwrap();
+    *globals = Some(constants);
+    Ok(())
+}
 
+// Console logging
+#[wasm_bindgen]
+extern "C" {
+    #[wasm_bindgen(js_namespace = console)]
+    fn log(s: &str);
+}
+
+fn console_log(message: &str) {
+    log(message);
+}
